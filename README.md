@@ -1,6 +1,6 @@
 # shellyconch
 
-A Python library for discovering and controlling [Shelly](https://www.shelly.com) smart home devices over HTTP — both locally on your LAN and remotely via the Shelly Cloud API.
+A conch is a type of shell that you can blow into to communicate or listen to. shellyconch is a Python library for discovering and controlling [Shelly](https://www.shelly.com) smart home devices over HTTP — both locally on your LAN and remotely via the Shelly Cloud API.
 
 ## Features
 
