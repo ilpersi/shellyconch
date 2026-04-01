@@ -139,4 +139,4 @@ See [`docs/usage.md`](docs/usage.md) for a complete, annotated reference coverin
 
 ## License
 
-MIT
+GNU GPL 3
