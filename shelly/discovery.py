@@ -31,6 +31,7 @@ from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
 
 from .gen1 import ShellyGen1
 from .gen2 import ShellyGen2
+from .device import ShellyDevice
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ _SHELLY_HOSTNAME_PREFIXES = ("shelly",)
 class ShellyListener(ServiceListener):
     def __init__(self, lock: threading.Lock, discovered_hosts: set, devices: list, password: str | None,
                  gen1_password: str | None, gen1_username: str, http_timeout: float, include_updates: bool = False,
-                 on_device_found: Callable | None = None, ):
+                 on_device_found: Callable | None = None,  return_generic: bool = False):
 
         self.lock = lock
         self.discovered_hosts = discovered_hosts
@@ -55,6 +56,7 @@ class ShellyListener(ServiceListener):
         self.http_timeout = http_timeout
         self.include_updates = include_updates
         self.on_device_found = on_device_found
+        self.return_generic = return_generic
 
     def add_service(self, zc, type_: str, name: str) -> None:
         info = zc.get_service_info(type_, name)
@@ -84,7 +86,7 @@ class ShellyListener(ServiceListener):
         # Probe the device to confirm it is Shelly and get accurate gen.
         device = _probe(host=host, port=info.port, txt_gen=gen, password=self.password,
                         gen1_password=self.gen1_password, gen1_username=self.gen1_username,
-                        http_timeout=self.http_timeout, )
+                        http_timeout=self.http_timeout, return_generic=self.return_generic)
         if device is None:
             return
 
@@ -115,7 +117,8 @@ class ShellyListener(ServiceListener):
 
 def discover_devices(timeout: float = 10.0, password: str | None = None, gen1_password: str | None = None,
                      gen1_username: str = "admin", http_timeout: float = 5.0, include_updates=False,
-                     on_device_found: Callable | None = None) -> list[ShellyGen1 | ShellyGen2]:
+                     on_device_found: Callable | None = None,  return_generic: bool = False) \
+        -> list[ShellyGen1 | ShellyGen2 | ShellyDevice]:
     """
     Discover all Shelly devices on the local network via mDNS.
 
@@ -142,6 +145,9 @@ def discover_devices(timeout: float = 10.0, password: str | None = None, gen1_pa
         Optional callback invoked for each device as soon as it is
         confirmed (before the full scan completes).  Receives a single
         argument — the device instance.
+    return_generic:
+        Optional boolean value. Set this to true to return devices using
+        the ``ShellyDevice`` class
 
     Returns
     -------
@@ -161,7 +167,8 @@ def discover_devices(timeout: float = 10.0, password: str | None = None, gen1_pa
 
     listener = ShellyListener(lock=lock, discovered_hosts=discovered_hosts, devices=devices, password=password,
                               gen1_password=_gen1_pass, gen1_username=gen1_username, http_timeout=http_timeout,
-                              include_updates=include_updates, on_device_found=on_device_found, )
+                              include_updates=include_updates, on_device_found=on_device_found,
+                              return_generic=return_generic)
 
     zc = Zeroconf()
     browsers = [ServiceBrowser(zc, svc_type, listener) for svc_type in _SERVICE_TYPES]
@@ -190,7 +197,8 @@ class ShellyDiscovery:
     """
 
     def __init__(self, password: str | None = None, gen1_password: str | None = None, gen1_username: str = "admin",
-                 http_timeout: float = 5.0, include_updates: bool = False, on_device_found: Callable | None = None, ):
+                 http_timeout: float = 5.0, include_updates: bool = False, on_device_found: Callable | None = None,
+                 return_generic: bool = False, ):
 
         self._password = password
         self._gen1_password = gen1_password if gen1_password is not None else password
@@ -198,6 +206,7 @@ class ShellyDiscovery:
         self._http_timeout = http_timeout
         self._include_updates = include_updates
         self._on_device_found = on_device_found
+        self.return_generic = return_generic
 
         self._lock = threading.Lock()
         self._discovered_hosts: set[str] = set()
@@ -216,7 +225,8 @@ class ShellyDiscovery:
         listener = ShellyListener(lock=self._lock, discovered_hosts=self._discovered_hosts, devices=self._devices,
                                   password=self._password, gen1_password=self._gen1_password,
                                   gen1_username=self._gen1_username, http_timeout=self._http_timeout,
-                                  include_updates=self._include_updates, on_device_found=self._on_device_found, )
+                                  include_updates=self._include_updates, on_device_found=self._on_device_found,
+                                  return_generic=self.return_generic)
 
         self._zc = Zeroconf()
         self._browsers = [ServiceBrowser(self._zc, svc_type, listener) for svc_type in _SERVICE_TYPES]
@@ -257,8 +267,9 @@ def _txt_gen(properties: dict | None) -> int | None:
     return None
 
 
-def _probe(host: str, port: int, txt_gen: int | None, password: str | None, gen1_password: str | None,
-           gen1_username: str, http_timeout: float, ) -> ShellyGen1 | ShellyGen2 | None:
+def _probe(host: str, port: int | None, txt_gen: int | None, password: str | None, gen1_password: str | None,
+           gen1_username: str, http_timeout: float, return_generic: bool = False) -> (ShellyGen1 | ShellyGen2 |
+                                                                                      ShellyDevice | None):
     """
     HTTP-probe a candidate IP to confirm it is a Shelly device and return
     the appropriate typed instance, or ``None`` if it is not a Shelly device.
@@ -284,6 +295,11 @@ def _probe(host: str, port: int, txt_gen: int | None, password: str | None, gen1
         gen = 1
 
     if gen == 1:
-        return ShellyGen1(host=host, port=port, timeout=http_timeout, username=gen1_username, password=gen1_password, )
+        device = ShellyGen1(host=host, port=port, timeout=http_timeout, username=gen1_username, password=gen1_password, )
     else:
-        return ShellyGen2(host=host, port=port, timeout=http_timeout, password=password, )
+        device = ShellyGen2(host=host, port=port, timeout=http_timeout, password=password, )
+
+    if return_generic:
+        return ShellyDevice(device=device)
+    else:
+        return device
