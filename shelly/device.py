@@ -197,6 +197,24 @@ class ShellyDevice:
             return {"mac": raw.get("mac", ""), "model": raw.get("model") or raw.get("app", ""),
                 "firmware": raw.get("ver", ""), "generation": gen, "auth_enabled": bool(raw.get("auth_en", False)), }
 
+    def get_name(self) -> str:
+        """
+        Return the device name.
+        """
+        if isinstance(self._device, ShellyGen1):
+            settings = self._device.get_settings()
+
+            name = settings.get("name", "unknown")
+            return name
+
+        else:
+            config = self._device.get_config()
+
+            if config.get("sys", False) and config["sys"].get("device", False):
+                return config["sys"]["device"].get("name", "unknown")
+            else:
+                return "unknown"
+
     def get_status(self) -> dict:
         """
         Return the full device status.
