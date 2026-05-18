@@ -48,9 +48,9 @@ class ShellyDevice:
             print(wrapped.get_info())
     """
 
-    def __init__(self, device: ShellyGen1 | ShellyGen2):
+    def __init__(self, device: ShellyGen1 | ShellyGen2, generation: int | None = None) -> None:
         self._device = device
-        self._generation: int | None = None
+        self._generation: int | None = generation
 
     # ------------------------------------------------------------------
     # Construction

@@ -300,6 +300,6 @@ def _probe(host: str, port: int | None, txt_gen: int | None, password: str | Non
         device = ShellyGen2(host=host, port=port, timeout=http_timeout, password=password, )
 
     if return_generic:
-        return ShellyDevice(device=device)
+        return ShellyDevice(device=device, generation=gen)
     else:
         return device
