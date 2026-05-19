@@ -13,19 +13,27 @@ A conch is a type of shell that you can blow into to communicate or listen to. s
 
 ## Requirements
 
-- Python >= 3.10
+- Python >= 3.14
 - `requests >= 2.26.0`
 - `zeroconf >= 0.38.0`
 
 ## Installation
 
 ```bash
-pip install requests zeroconf
+pip install shellyconch
 ```
 
-Or install directly from this repository:
+The package installs as the import name `shelly`:
+
+```python
+from shelly import ShellyDevice, discover_devices
+```
+
+### From source
 
 ```bash
+git clone https://github.com/ilpersi/shellyconch.git
+cd shellyconch
 pip install -e .
 ```
 
