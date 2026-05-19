@@ -25,3 +25,7 @@ env/
 .vscode/
 *.swp
 .DS_Store
+
+# Local one-off scripts (not part of the package)
+*.local.ps1
+*.local.sh
