@@ -495,3 +495,66 @@ class Gen2SysConfig(TypedDict):
     rpc_udp: Gen2SysRpcUdpConfig
     sntp: Gen2SysSntpConfig
     cfg_rev: ReadOnly[NotRequired[int]]
+
+
+# ---------------------------------------------------------------------------
+# Cross-generation normalized shapes
+# ---------------------------------------------------------------------------
+
+class WifiStaInfo(TypedDict):
+    """
+    Normalized WiFi station-mode (client) configuration entry.
+
+    Returned as the value of the ``sta`` and ``sta1`` keys of
+    :class:`WifiInfo`.  Generation-specific key names (``enable`` vs.
+    ``enabled``, ``ipv4mode`` vs. ``ipv4_method``, ``netmask`` vs. ``mask``,
+    ``nameserver`` vs. ``dns``) are flattened into a single schema.
+
+    Attributes
+    ----------
+    enabled:
+        Whether this STA slot is active.
+    ssid:
+        Configured SSID, or ``None`` if unset.
+    ipv4_method:
+        IPv4 configuration mode — typically ``"dhcp"`` or ``"static"``.
+    ip:
+        Static IPv4 address, or ``None`` when in DHCP mode.
+    gw:
+        Static IPv4 gateway, or ``None`` when in DHCP mode.
+    mask:
+        Static IPv4 netmask, or ``None`` when in DHCP mode.
+    dns:
+        Static IPv4 DNS server, or ``None`` when in DHCP mode.
+    is_open:
+        ``True`` for an unsecured (open) network, ``False`` otherwise, or
+        ``None`` when the generation does not report this field (Gen1).
+    """
+    enabled: bool
+    ssid: str | None
+    ipv4_method: str
+    ip: str | None
+    gw: str | None
+    mask: str | None
+    dns: str | None
+    is_open: bool | None
+
+
+class WifiInfo(TypedDict):
+    """
+    Normalized WiFi station-mode configuration.
+
+    Shelly devices support a primary station (``sta``) and an optional
+    backup (``sta1``).  Returned by
+    :meth:`~shelly.ShellyDevice.get_wifi_sta`.
+
+    Attributes
+    ----------
+    sta:
+        Primary station configuration.
+    sta1:
+        Backup station configuration, or ``None`` when the device has none
+        configured.
+    """
+    sta: WifiStaInfo
+    sta1: WifiStaInfo | None

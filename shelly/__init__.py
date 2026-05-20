@@ -64,6 +64,8 @@ from .models import (
     Gen2UpdateStage,
     InitialState,
     RelayState,
+    WifiInfo,
+    WifiStaInfo,
 )
 
 __all__ = [
@@ -95,6 +97,9 @@ __all__ = [
     "Gen2CoverInMode",
     "Gen2InputType",
     "Gen2UpdateStage",
+    # Normalized cross-generation shapes
+    "WifiInfo",
+    "WifiStaInfo",
 ]
 
 __version__ = "0.1.0"

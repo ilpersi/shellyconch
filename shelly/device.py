@@ -17,7 +17,35 @@ import requests
 from .exceptions import ShellyConnectionError
 from .gen1 import ShellyGen1
 from .gen2 import ShellyGen2
-from .models import GEN1_MODELS
+from .models import GEN1_MODELS, WifiInfo, WifiStaInfo
+
+
+def _gen1_sta(raw: dict) -> WifiStaInfo:
+    """Normalize a Gen1 ``wifi_sta`` / ``wifi_sta1`` settings block."""
+    return {
+        "enabled": raw["enabled"],
+        "ssid": raw["ssid"],
+        "ipv4_method": raw["ipv4_method"],
+        "ip": raw["ip"],
+        "gw": raw["gw"],
+        "mask": raw["mask"],
+        "dns": raw["dns"],
+        "is_open": None,  # Gen1 /settings does not expose this field
+    }
+
+
+def _gen2_sta(raw: dict) -> WifiStaInfo:
+    """Normalize a Gen2+ ``wifi.sta`` / ``wifi.sta1`` config block."""
+    return {
+        "enabled": raw["enable"],
+        "ssid": raw["ssid"],
+        "ipv4_method": raw["ipv4mode"],
+        "ip": raw["ip"],
+        "gw": raw["gw"],
+        "mask": raw["netmask"],
+        "dns": raw["nameserver"],
+        "is_open": raw["is_open"],
+    }
 
 
 class ShellyDevice:
@@ -197,23 +225,50 @@ class ShellyDevice:
             return {"mac": raw.get("mac", ""), "model": raw.get("model") or raw.get("app", ""),
                 "firmware": raw.get("ver", ""), "generation": gen, "auth_enabled": bool(raw.get("auth_en", False)), }
 
-    def get_name(self) -> str:
+    def get_name(self) -> str | None:
         """
-        Return the device name.
+        Return the device's user-configured display name, or ``None`` if unset.
+
+        * Gen1: read from ``settings.name`` (``GET /settings``).
+        * Gen2+: read from ``config.sys.device.name`` (``Sys.GetConfig``).
+        """
+        if isinstance(self._device, ShellyGen1):
+            return self._device.get_settings().get("name")
+        return (
+            self._device.get_config()
+            .get("sys", {})
+            .get("device", {})
+            .get("name")
+        )
+
+    def get_wifi_sta(self) -> WifiInfo:
+        """
+        Return the WiFi station-mode (client) configuration in a normalized shape.
+
+        Shelly devices support a primary station (``sta``) and an optional
+        backup (``sta1``).  This method flattens the differing Gen1/Gen2 key
+        names into the single :class:`~shelly.models.WifiInfo` schema.
+
+        The ``sta1`` entry is ``None`` when the device has no backup
+        configuration; ``sta`` is always present.
+
+        On Gen1, ``is_open`` is reported as ``None`` because the Gen1
+        ``/settings`` endpoint does not expose it.
         """
         if isinstance(self._device, ShellyGen1):
             settings = self._device.get_settings()
+            sta1 = settings.get("wifi_sta1", {})
+            return {
+                "sta": _gen1_sta(settings["wifi_sta"]),
+                "sta1": _gen1_sta(sta1) if sta1 else None,
+            }
 
-            name = settings.get("name", "unknown")
-            return name
-
-        else:
-            config = self._device.get_config()
-
-            if config.get("sys", False) and config["sys"].get("device", False):
-                return config["sys"]["device"].get("name", "unknown")
-            else:
-                return "unknown"
+        wifi = self._device.get_config()["wifi"]
+        sta1 = wifi.get("sta1")
+        return {
+            "sta": _gen2_sta(wifi["sta"]),
+            "sta1": _gen2_sta(sta1) if sta1 is not None else None,
+        }
 
     def get_status(self) -> dict:
         """
