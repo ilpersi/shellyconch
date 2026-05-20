@@ -20,34 +20,6 @@ from .gen2 import ShellyGen2
 from .models import GEN1_MODELS, WifiInfo, WifiStaInfo
 
 
-def _gen1_sta(raw: dict) -> WifiStaInfo:
-    """Normalize a Gen1 ``wifi_sta`` / ``wifi_sta1`` settings block."""
-    return {
-        "enabled": raw["enabled"],
-        "ssid": raw["ssid"],
-        "ipv4_method": raw["ipv4_method"],
-        "ip": raw["ip"],
-        "gw": raw["gw"],
-        "mask": raw["mask"],
-        "dns": raw["dns"],
-        "is_open": None,  # Gen1 /settings does not expose this field
-    }
-
-
-def _gen2_sta(raw: dict) -> WifiStaInfo:
-    """Normalize a Gen2+ ``wifi.sta`` / ``wifi.sta1`` config block."""
-    return {
-        "enabled": raw["enable"],
-        "ssid": raw["ssid"],
-        "ipv4_method": raw["ipv4mode"],
-        "ip": raw["ip"],
-        "gw": raw["gw"],
-        "mask": raw["netmask"],
-        "dns": raw["nameserver"],
-        "is_open": raw["is_open"],
-    }
-
-
 class ShellyDevice:
     """
     Generation-agnostic wrapper for Shelly devices.
@@ -255,20 +227,48 @@ class ShellyDevice:
         On Gen1, ``is_open`` is reported as ``None`` because the Gen1
         ``/settings`` endpoint does not expose it.
         """
+        # Per-generation prelude: the WiFi block lives in different places,
+        # uses different sta/sta1 key names, and uses different field names
+        # inside each station block.  ``key_map`` translates the per-gen raw
+        # field names to the normalized WifiStaInfo keys; a ``None`` source
+        # name means the field is not exposed by this generation.
         if isinstance(self._device, ShellyGen1):
-            settings = self._device.get_settings()
-            sta1 = settings.get("wifi_sta1", {})
-            return {
-                "sta": _gen1_sta(settings["wifi_sta"]),
-                "sta1": _gen1_sta(sta1) if sta1 else None,
+            wifi = self._device.get_settings()
+            sta_key, sta1_key = "wifi_sta", "wifi_sta1"
+            key_map: dict[str, str | None] = {
+                "enabled":     "enabled",
+                "ssid":        "ssid",
+                "ipv4_method": "ipv4_method",
+                "ip":          "ip",
+                "gw":          "gw",
+                "mask":        "mask",
+                "dns":         "dns",
+                "is_open":     None,  # Gen1 /settings does not expose this
+            }
+        else:
+            wifi = self._device.get_config()["wifi"]
+            sta_key, sta1_key = "sta", "sta1"
+            key_map: dict[str, str] = {
+                "enabled":     "enable",
+                "ssid":        "ssid",
+                "ipv4_method": "ipv4mode",
+                "ip":          "ip",
+                "gw":          "gw",
+                "mask":        "netmask",
+                "dns":         "nameserver",
+                "is_open":     "is_open",
             }
 
-        wifi = self._device.get_config()["wifi"]
-        sta1 = wifi.get("sta1")
-        return {
-            "sta": _gen2_sta(wifi["sta"]),
-            "sta1": _gen2_sta(sta1) if sta1 is not None else None,
-        }
+        sta_raw = wifi[sta_key]
+        sta1_raw = wifi.get(sta1_key)
+
+        return WifiInfo(
+            sta=WifiStaInfo(**{dst: sta_raw[src] if src is not None else None
+                               for dst, src in key_map.items()}),
+            sta1=(WifiStaInfo(**{dst: sta1_raw[src] if src is not None else None
+                                 for dst, src in key_map.items()})
+                  if sta1_raw else None),
+        )
 
     def get_status(self) -> dict:
         """
