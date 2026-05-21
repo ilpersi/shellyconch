@@ -84,11 +84,23 @@ class ShellyGen2(BaseShelly):
             raise ShellyRPCError(err.get("code", -1), err.get("message", ""))
         return resp.get("result")
 
+    def get_info(self):
+        """
+        Return basic device information.
+
+        This endpoint is always accessible even when auth is enabled.
+
+        Returns a dict with keys ``name``, ``id``, ``slot``, ``mode``,
+        ``gen``, ``fw_id``, ``ver``, ``app``, ``auth_en``, ``auth_domain``,
+        ``profile``.
+        """
+        return self._get("/shelly")
+
     # ------------------------------------------------------------------
     # Shelly component (device management)
     # ------------------------------------------------------------------
 
-    def get_info(self, ident: bool = False) -> dict:
+    def get_device_info(self, ident: bool = False) -> dict:
         """
         Return basic device identification.
 
