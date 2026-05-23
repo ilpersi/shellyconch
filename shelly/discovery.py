@@ -24,6 +24,7 @@ Requires the ``zeroconf`` package (``pip install zeroconf``).
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 import requests
@@ -44,8 +45,9 @@ _SHELLY_HOSTNAME_PREFIXES = ("shelly",)
 
 class ShellyListener(ServiceListener):
     def __init__(self, lock: threading.Lock, discovered_hosts: set, devices: list, password: str | None,
-                 gen1_password: str | None, gen1_username: str, http_timeout: float, include_updates: bool = False,
-                 on_device_found: Callable | None = None,  return_generic: bool = False):
+                 gen1_password: str | None, gen1_username: str, http_timeout: float, executor: ThreadPoolExecutor,
+                 include_updates: bool = False, on_device_found: Callable | None = None,
+                 return_generic: bool = False, probe_attempts: int = 3, probe_retry_interval: float = 0.5):
 
         self.lock = lock
         self.discovered_hosts = discovered_hosts
@@ -54,19 +56,26 @@ class ShellyListener(ServiceListener):
         self.gen1_password = gen1_password
         self.gen1_username = gen1_username
         self.http_timeout = http_timeout
+        self.executor = executor
         self.include_updates = include_updates
         self.on_device_found = on_device_found
         self.return_generic = return_generic
+        self.probe_attempts = probe_attempts
+        self.probe_retry_interval = probe_retry_interval
 
     def add_service(self, zc, type_: str, name: str) -> None:
+        # Resolve the service info — retry once if the first call returns
+        # None (zeroconf sometimes hasn't fully populated the record yet).
         info = zc.get_service_info(type_, name)
         if info is None:
-            return
+            info = zc.get_service_info(type_, name, timeout=2000)
+            if info is None:
+                logger.debug("Could not resolve service info for %s after retry", name)
+                return
 
-        addresses = info.parsed_addresses()
-        if not addresses:
+        host = _pick_host(info.parsed_addresses())
+        if host is None:
             return
-        host = addresses[0]
 
         # For _http._tcp services, only consider hosts whose mDNS name
         # begins with "shelly" to avoid probing unrelated devices.
@@ -75,18 +84,30 @@ class ShellyListener(ServiceListener):
             if not any(server_name.startswith(p) for p in _SHELLY_HOSTNAME_PREFIXES):
                 return
 
+        # Dedup at "intent to probe" — prevents two parallel probes for the
+        # same device announcing on both service types, while still letting
+        # _probe()'s internal retries recover from transient HTTP failures.
         with self.lock:
             if host in self.discovered_hosts:
                 return
             self.discovered_hosts.add(host)
 
-        # Determine generation from the TXT record first (fast path).
-        gen = _txt_gen(info.properties)
+        # Run the probe on the worker pool so the listener thread stays
+        # responsive to incoming announcements.  RuntimeError is raised when
+        # the executor has been shut down (late callback during teardown).
+        try:
+            self.executor.submit(self._probe_and_record, info, host)
+        except RuntimeError:
+            logger.debug("Skipping late probe for %s: executor shut down", host)
 
-        # Probe the device to confirm it is Shelly and get accurate gen.
-        device = _probe(host=host, port=info.port, txt_gen=gen, password=self.password,
-                        gen1_password=self.gen1_password, gen1_username=self.gen1_username,
-                        http_timeout=self.http_timeout, return_generic=self.return_generic)
+    def _probe_and_record(self, info, host: str) -> None:
+        gen = _txt_gen(info.properties)
+        device = _probe(
+            host=host, port=info.port, txt_gen=gen, password=self.password,
+            gen1_password=self.gen1_password, gen1_username=self.gen1_username,
+            http_timeout=self.http_timeout, return_generic=self.return_generic,
+            attempts=self.probe_attempts, retry_interval=self.probe_retry_interval,
+        )
         if device is None:
             return
 
@@ -94,17 +115,19 @@ class ShellyListener(ServiceListener):
             self.devices.append(device)
 
         if self.on_device_found is not None:
-            self.on_device_found(device)
+            try:
+                self.on_device_found(device)
+            except Exception:
+                logger.exception("on_device_found callback raised for %s", host)
 
     def remove_service(self, zc, type_: str, name: str) -> None:
         info = zc.get_service_info(type_, name)
         if info is None:
             return
 
-        addresses = info.parsed_addresses()
-        if not addresses:
+        host = _pick_host(info.parsed_addresses())
+        if host is None:
             return
-        host = addresses[0]
 
         with self.lock:
             if host in self.discovered_hosts:
@@ -117,8 +140,9 @@ class ShellyListener(ServiceListener):
 
 def discover_devices(timeout: float = 10.0, password: str | None = None, gen1_password: str | None = None,
                      gen1_username: str = "admin", http_timeout: float = 5.0, include_updates=False,
-                     on_device_found: Callable | None = None,  return_generic: bool = False) \
-        -> list[ShellyGen1 | ShellyGen2 | ShellyDevice]:
+                     on_device_found: Callable | None = None,  return_generic: bool = False,
+                     probe_attempts: int = 3, probe_retry_interval: float = 0.5,
+                     max_concurrent_probes: int = 16) -> list[ShellyGen1 | ShellyGen2 | ShellyDevice]:
     """
     Discover all Shelly devices on the local network via mDNS.
 
@@ -148,6 +172,15 @@ def discover_devices(timeout: float = 10.0, password: str | None = None, gen1_pa
     return_generic:
         Optional boolean value. Set this to true to return devices using
         the ``ShellyDevice`` class
+    probe_attempts:
+        Number of HTTP probe attempts per candidate before giving up
+        (default 3).
+    probe_retry_interval:
+        Seconds to wait between probe attempts (default 0.5).
+    max_concurrent_probes:
+        Maximum number of HTTP probes that may run in parallel.  Probes run
+        in a worker pool so a slow/unreachable device cannot block discovery
+        of others (default 16).
 
     Returns
     -------
@@ -165,10 +198,12 @@ def discover_devices(timeout: float = 10.0, password: str | None = None, gen1_pa
     # Resolve the effective Gen1 password.
     _gen1_pass = gen1_password if gen1_password is not None else password
 
+    executor = ThreadPoolExecutor(max_workers=max_concurrent_probes, thread_name_prefix="shelly-probe")
     listener = ShellyListener(lock=lock, discovered_hosts=discovered_hosts, devices=devices, password=password,
                               gen1_password=_gen1_pass, gen1_username=gen1_username, http_timeout=http_timeout,
-                              include_updates=include_updates, on_device_found=on_device_found,
-                              return_generic=return_generic)
+                              executor=executor, include_updates=include_updates, on_device_found=on_device_found,
+                              return_generic=return_generic, probe_attempts=probe_attempts,
+                              probe_retry_interval=probe_retry_interval)
 
     zc = Zeroconf()
     browsers = [ServiceBrowser(zc, svc_type, listener) for svc_type in _SERVICE_TYPES]
@@ -176,8 +211,12 @@ def discover_devices(timeout: float = 10.0, password: str | None = None, gen1_pa
     try:
         time.sleep(timeout)
     finally:
+        # Stop new mDNS callbacks first, then drain in-flight probes, then
+        # close zeroconf.  Order matters: closing zeroconf while probes are
+        # still running can sever HTTP sockets mid-request.
         for browser in browsers:
             browser.cancel()
+        executor.shutdown(wait=True)
         zc.close()
 
     return devices
@@ -198,7 +237,8 @@ class ShellyDiscovery:
 
     def __init__(self, password: str | None = None, gen1_password: str | None = None, gen1_username: str = "admin",
                  http_timeout: float = 5.0, include_updates: bool = False, on_device_found: Callable | None = None,
-                 return_generic: bool = False, ):
+                 return_generic: bool = False, probe_attempts: int = 3, probe_retry_interval: float = 0.5,
+                 max_concurrent_probes: int = 16, ):
 
         self._password = password
         self._gen1_password = gen1_password if gen1_password is not None else password
@@ -207,12 +247,16 @@ class ShellyDiscovery:
         self._include_updates = include_updates
         self._on_device_found = on_device_found
         self.return_generic = return_generic
+        self._probe_attempts = probe_attempts
+        self._probe_retry_interval = probe_retry_interval
+        self._max_concurrent_probes = max_concurrent_probes
 
         self._lock = threading.Lock()
         self._discovered_hosts: set[str] = set()
         self._devices: list[ShellyGen1 | ShellyGen2] = []
         self._zc: Zeroconf | None = None
         self._browsers: list = []
+        self._executor: ThreadPoolExecutor | None = None
 
     @property
     def devices(self) -> list[ShellyGen1 | ShellyGen2]:
@@ -222,11 +266,15 @@ class ShellyDiscovery:
 
     def start(self) -> None:
         """Begin mDNS browsing in the background."""
+        self._executor = ThreadPoolExecutor(max_workers=self._max_concurrent_probes,
+                                            thread_name_prefix="shelly-probe")
         listener = ShellyListener(lock=self._lock, discovered_hosts=self._discovered_hosts, devices=self._devices,
                                   password=self._password, gen1_password=self._gen1_password,
                                   gen1_username=self._gen1_username, http_timeout=self._http_timeout,
-                                  include_updates=self._include_updates, on_device_found=self._on_device_found,
-                                  return_generic=self.return_generic)
+                                  executor=self._executor, include_updates=self._include_updates,
+                                  on_device_found=self._on_device_found, return_generic=self.return_generic,
+                                  probe_attempts=self._probe_attempts,
+                                  probe_retry_interval=self._probe_retry_interval)
 
         self._zc = Zeroconf()
         self._browsers = [ServiceBrowser(self._zc, svc_type, listener) for svc_type in _SERVICE_TYPES]
@@ -235,6 +283,9 @@ class ShellyDiscovery:
         """Stop mDNS browsing and release resources."""
         for browser in self._browsers:
             browser.cancel()
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
         if self._zc is not None:
             self._zc.close()
             self._zc = None
@@ -267,20 +318,43 @@ def _txt_gen(properties: dict | None) -> int | None:
     return None
 
 
+def _pick_host(addresses: list[str]) -> str | None:
+    """Prefer the first IPv4 address; fall back to IPv6 if that's all there is."""
+    if not addresses:
+        return None
+    for a in addresses:
+        if ":" not in a:
+            return a
+    return addresses[0]
+
+
 def _probe(host: str, port: int | None, txt_gen: int | None, password: str | None, gen1_password: str | None,
-           gen1_username: str, http_timeout: float, return_generic: bool = False) -> (ShellyGen1 | ShellyGen2 |
-                                                                                      ShellyDevice | None):
+           gen1_username: str, http_timeout: float, return_generic: bool = False,
+           attempts: int = 3, retry_interval: float = 0.5) -> (ShellyGen1 | ShellyGen2 | ShellyDevice | None):
     """
     HTTP-probe a candidate IP to confirm it is a Shelly device and return
     the appropriate typed instance, or ``None`` if it is not a Shelly device.
+
+    Retries up to ``attempts`` times on transient failure (connection refused
+    mid-boot, network blip, slow first response) — Shelly devices that
+    advertise via mDNS are sometimes briefly unreachable on HTTP.
     """
     url = f"http://{host}:{port}/shelly"
-    try:
-        resp = requests.get(url, timeout=http_timeout)
-        resp.raise_for_status()
-        info = resp.json()
-    except Exception as exc:
-        logger.debug("Probe failed for %s: %s", host, exc)
+    info: dict | None = None
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.get(url, timeout=http_timeout)
+            resp.raise_for_status()
+            info = resp.json()
+            break
+        except Exception as exc:
+            last_exc = exc
+            logger.debug("Probe attempt %d/%d for %s failed: %s", attempt, attempts, host, exc)
+            if attempt < attempts:
+                time.sleep(retry_interval)
+    if info is None:
+        logger.debug("Probe gave up on %s after %d attempts (last error: %s)", host, attempts, last_exc)
         return None
 
     # Confirm the response looks like a Shelly /shelly endpoint.
