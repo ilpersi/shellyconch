@@ -224,6 +224,50 @@ def git_push(version: str, *, dry_run: bool = False) -> None:
 
 # --- install verification ----------------------------------------------------
 
+def _json_api_has_version(host: str, version: str) -> tuple[bool, str]:
+    """Check PyPI's JSON API.  Returns (ready, short status for diagnostics)."""
+    url = f"https://{host}/pypi/{PKG_NAME}/json"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read())
+        if version in data.get("releases", {}):
+            return True, "ok"
+        return False, "version not in releases"
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}"
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
+        return False, type(exc).__name__
+
+
+def _simple_index_has_version(host: str, version: str) -> tuple[bool, str]:
+    """Check PyPI's Simple index (PEP 691 JSON form) — the one pip actually uses."""
+    url = f"https://{host}/simple/{PKG_NAME}/"
+    req = urllib.request.Request(
+        url,
+        headers={"Accept": "application/vnd.pypi.simple.v1+json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        # PEP 700 adds a top-level `versions` list; prefer it when present.
+        versions = data.get("versions")
+        if versions is not None:
+            if version in versions:
+                return True, "ok"
+            return False, "version not in versions"
+        # Fallback: scan filenames (sdist: pkg-version.tar.gz; wheel: pkg-version-…whl).
+        prefixes = (f"{PKG_NAME}-{version}.", f"{PKG_NAME}-{version}-")
+        for f in data.get("files", []):
+            filename = f.get("filename", "")
+            if filename.startswith(prefixes):
+                return True, "ok"
+        return False, "version not in files"
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}"
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
+        return False, type(exc).__name__
+
+
 def wait_for_pypi_release(
     version: str,
     *,
@@ -232,29 +276,27 @@ def wait_for_pypi_release(
     interval: float = 5.0,
 ) -> None:
     """
-    Poll PyPI's JSON API until ``version`` appears in the project's release list.
+    Poll PyPI until ``version`` is visible on both the JSON API and the
+    Simple index.
 
     ``twine upload`` returns as soon as the upload succeeds, but PyPI's CDN
     needs a few seconds (occasionally minutes) before the new version is
-    resolvable to ``pip install``.  Polling the JSON API closes that race.
+    resolvable to ``pip install``.  The JSON API (``/pypi/{pkg}/json``) and
+    the Simple index (``/simple/{pkg}/``) are served by independent Fastly
+    caches and can be out of sync — ``pip`` reads the Simple index, so we
+    wait for both endpoints to agree before declaring readiness.
     """
     host = "test.pypi.org" if testpypi else "pypi.org"
-    url = f"https://{host}/pypi/{PKG_NAME}/json"
     deadline = time.monotonic() + timeout
     print(f"waiting for {PKG_NAME}=={version} to appear on {host}", end="", flush=True)
     last_status: str = "no response yet"
     while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                data = json.loads(resp.read())
-            if version in data.get("releases", {}):
-                print(" — ready")
-                return
-            last_status = f"version not yet in releases list"
-        except urllib.error.HTTPError as exc:
-            last_status = f"HTTP {exc.code}"
-        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
-            last_status = type(exc).__name__
+        json_ok, json_status = _json_api_has_version(host, version)
+        simple_ok, simple_status = _simple_index_has_version(host, version)
+        if json_ok and simple_ok:
+            print(" — ready")
+            return
+        last_status = f"json={json_status}, simple={simple_status}"
         print(".", end="", flush=True)
         time.sleep(interval)
     print()
