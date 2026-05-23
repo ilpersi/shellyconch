@@ -17,7 +17,7 @@ import requests
 from .exceptions import ShellyConnectionError
 from .gen1 import ShellyGen1
 from .gen2 import ShellyGen2
-from .models import GEN1_MODELS, WifiInfo, WifiStaInfo
+from .models import GEN1_MODELS, GEN2_PLUS_MODELS, WifiInfo, WifiStaInfo
 
 
 class ShellyDevice:
@@ -175,8 +175,9 @@ class ShellyDevice:
         ``mac``
             Hardware MAC address (no colons).
         ``model``
-            Human-readable model name (e.g. ``"Shelly1PM"`` or
-            ``"ShellyPlus1PM"``).
+            Human-readable model name (e.g. ``"Shelly 1PM"`` or
+            ``"Shelly Plus 1PM"``).  Falls back to the raw model identifier
+            string when the code is not in the lookup table.
         ``firmware``
             Firmware version string.
         ``generation``
@@ -194,7 +195,9 @@ class ShellyDevice:
             gen = raw.get("gen", 2)
             if self._generation is None:
                 self._generation = gen
-            return {"mac": raw.get("mac", ""), "model": raw.get("model") or raw.get("app", ""),
+            model_id = raw.get("model") or ""
+            model = GEN2_PLUS_MODELS.get(model_id) or model_id or raw.get("app", "")
+            return {"mac": raw.get("mac", ""), "model": model,
                 "firmware": raw.get("ver", ""), "generation": gen, "auth_enabled": bool(raw.get("auth_en", False)), }
 
     def get_name(self) -> str | None:

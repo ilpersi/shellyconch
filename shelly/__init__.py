@@ -54,6 +54,8 @@ from .exceptions import (
 from .gen1 import ShellyGen1
 from .gen2 import ShellyGen2
 from .models import (
+    GEN1_MODELS,
+    GEN2_PLUS_MODELS,
     Gen1ButtonType,
     Gen1LightMode,
     Gen1RollerDirection,
@@ -97,6 +99,9 @@ __all__ = [
     "Gen2CoverInMode",
     "Gen2InputType",
     "Gen2UpdateStage",
+    # Model identifier → human name lookups
+    "GEN1_MODELS",
+    "GEN2_PLUS_MODELS",
     # Normalized cross-generation shapes
     "WifiInfo",
     "WifiStaInfo",
