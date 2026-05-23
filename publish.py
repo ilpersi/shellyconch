@@ -306,6 +306,44 @@ def wait_for_pypi_release(
     )
 
 
+def _is_transient_pip_index_error(stderr: str) -> bool:
+    """True when pip's failure looks like a Fastly POP that hasn't propagated yet."""
+    return (
+        "No matching distribution found" in stderr
+        or "Could not find a version that satisfies" in stderr
+    )
+
+
+def _pip_install_with_retry(
+    install_cmd: list[str],
+    *,
+    attempts: int = 6,
+    interval: float = 10.0,
+) -> None:
+    """Run a pip install, retrying only on transient index-cache misses.
+
+    Even after ``wait_for_pypi_release`` reports both endpoints ready, the
+    Fastly POP that pip's request happens to hit may still be cold.  Retry
+    on that specific error; surface anything else (auth, deps, network)
+    immediately so real failures aren't masked.
+    """
+    printable = " ".join(c if " " not in c else f'"{c}"' for c in install_cmd)
+    print(f"$ {printable}")
+    for attempt in range(1, attempts + 1):
+        result = subprocess.run(install_cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            sys.stdout.write(result.stdout)
+            return
+        if attempt < attempts and _is_transient_pip_index_error(result.stderr):
+            print(f"(transient index-cache miss; retry {attempt}/{attempts - 1} "
+                  f"in {interval:.0f}s)")
+            time.sleep(interval)
+            continue
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        raise subprocess.CalledProcessError(result.returncode, install_cmd)
+
+
 def verify_install(version: str, *, testpypi: bool = False, dry_run: bool = False) -> None:
     if dry_run:
         src = "TestPyPI" if testpypi else "PyPI"
@@ -332,7 +370,7 @@ def verify_install(version: str, *, testpypi: bool = False, dry_run: bool = Fals
         else:
             install_cmd = [str(py), "-m", "pip", "install", "--upgrade",
                            f"{PKG_NAME}=={version}"]
-        run(install_cmd)
+        _pip_install_with_retry(install_cmd)
 
         got = capture([str(py), "-c",
                        f"import {IMPORT_NAME}; print({IMPORT_NAME}.__version__)"]).strip()
